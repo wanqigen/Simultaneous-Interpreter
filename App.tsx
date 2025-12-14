@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Mic, Square, AlertCircle, Radio, Server, Cpu, Settings, RefreshCw, ChevronDown, Wifi, WifiOff, ChevronUp } from 'lucide-react';
+import { Mic, Square, AlertCircle, Radio, Server, Cpu, Settings, RefreshCw, ChevronDown, Wifi, WifiOff, ChevronUp, Check, AlertTriangle } from 'lucide-react';
 import { useLocalTranslator } from './hooks/useGeminiTranslator';
 import { ConnectionState } from './types';
 import Visualizer from './components/Visualizer';
@@ -44,77 +44,31 @@ const App: React.FC = () => {
   const isConnected = connectionState === ConnectionState.CONNECTED;
   const isConnecting = connectionState === ConnectionState.CONNECTING;
 
-  // 临时测试函数 - 可以在浏览器控制台运行
-  (window as any).testOllamaAPI = async () => {
-    try {
-      console.log('Testing Ollama API directly...');
-      const response = await fetch('http://localhost:11434/api/tags');
-      console.log('Response status:', response.status);
-      console.log('Response headers:', response.headers);
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const data = await response.json();
-      console.log('Full API Response:', data);
-      console.log('Models array:', data.models);
-      console.log('Models type:', typeof data.models);
-      console.log('Is array:', Array.isArray(data.models));
-
-      if (data.models && Array.isArray(data.models)) {
-        const names = data.models.map((m: any) => m.name);
-        console.log('Extracted names:', names);
-        console.log('Names count:', names.length);
-
-        // 测试设置到状态
-        setAvailableModels(names);
-        console.log('Models set to state');
-      } else {
-        console.error('No valid models array found');
-      }
-    } catch (err) {
-      console.error('API Test failed:', err);
-    }
-  };
-
   // Auto-refresh models on mount
   useEffect(() => {
-    console.log('App: Component mounting, refreshing models...');
     refreshModels().then(() => setLastRefreshTime(new Date()));
   }, [refreshModels]);
 
   // Auto-refresh models when Ollama URL changes
   useEffect(() => {
-    console.log('App: Ollama URL changed, refreshing models...');
     refreshModels().then(() => setLastRefreshTime(new Date()));
   }, [ollamaUrl, refreshModels]);
 
   // Sync modelName with availableModels
   useEffect(() => {
-    console.log('App: availableModels updated:', availableModels);
-    console.log('App: availableModels length:', availableModels.length);
-
-    // 如果当前选择的模型不在新的模型列表中，尝试选择之前使用的模型，否则选择第一个
     if (availableModels.length > 0) {
       if (!availableModels.includes(modelName)) {
-        // 尝试使用之前选择的模型
         if (availableModels.includes(prevSelectedModel)) {
-          console.log('Using previously selected model:', prevSelectedModel);
           setModelName(prevSelectedModel);
         } else {
-          console.log('Current model not in list, updating to first available model');
           setModelName(availableModels[0]);
         }
       }
     } else if (availableModels.length === 0) {
-      console.log('No models available, resetting to default');
       setModelName('llama3');
     }
   }, [availableModels, modelName, prevSelectedModel]);
 
-  
-  // Helper function to handle model selection
   const handleModelSelect = (model: string) => {
     setModelName(model);
     setPrevSelectedModel(model);
@@ -218,9 +172,9 @@ const App: React.FC = () => {
                        </span>
                      )}
                      {availableModels.length > 0 && (
-                       <span className={availableModels.includes(modelName) ? "text-green-400 text-xs" : "text-yellow-400 text-xs"}
+                       <span className={availableModels.includes(modelName) ? "text-green-400 text-xs flex items-center gap-1" : "text-yellow-400 text-xs flex items-center gap-1"}
                              title={availableModels.includes(modelName) ? "Model is available" : "Model not in available list"}>
-                         {availableModels.includes(modelName) ? "✓" : "⚠"} {modelName}
+                         {availableModels.includes(modelName) ? <Check className="w-3 h-3" /> : <AlertTriangle className="w-3 h-3" />} {modelName}
                        </span>
                      )}
                      {lastRefreshTime && (
