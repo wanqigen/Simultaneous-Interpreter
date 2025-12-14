@@ -9,7 +9,7 @@ const Visualizer: React.FC<AudioVisualizerProps> = ({ stream, isActive, color })
 
   useEffect(() => {
     if (!stream || !isActive) {
-       if(contextRef.current) {
+       if(contextRef.current && contextRef.current.state !== 'closed') {
            contextRef.current.close();
            contextRef.current = null;
        }
