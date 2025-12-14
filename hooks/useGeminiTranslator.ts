@@ -40,7 +40,6 @@ export const useLocalTranslator = (config: LocalTranslatorConfig) => {
   const initModel = async () => {
     try {
       setStatusMessage('Downloading Whisper model (approx 40MB)... this happens once.');
-      setConnectionState(ConnectionState.CONNECTING);
       setDownloadProgress(0);
 
       // Create a custom progress callback
@@ -58,14 +57,11 @@ export const useLocalTranslator = (config: LocalTranslatorConfig) => {
       });
       transcriberRef.current = transcriber;
 
-      setStatusMessage('Model loaded. Ready.');
-      setConnectionState(ConnectionState.CONNECTED);
+      setStatusMessage('Model loaded.');
       setDownloadProgress(100);
     } catch (err: any) {
       console.error(err);
-      setError("Failed to load Whisper model. Check internet connection.");
-      setConnectionState(ConnectionState.ERROR);
-      setDownloadProgress(0);
+      throw new Error("Failed to load Whisper model. Check internet connection.");
     }
   };
 
@@ -121,8 +117,6 @@ export const useLocalTranslator = (config: LocalTranslatorConfig) => {
 
       const data = await response.json();
 
-      console.log('Ollama API Response:', data);
-
       let models: any[] = [];
 
       // Try standard format
@@ -176,7 +170,7 @@ export const useLocalTranslator = (config: LocalTranslatorConfig) => {
     } catch (err: any) {
       console.error("Failed to fetch models", err);
       const errorMessage = err?.message || `Cannot connect to Ollama at ${config.ollamaUrl}`;
-      setError(errorMessage);
+      // Do not set global error here to avoid blocking UI during auto-refresh
       setAvailableModels([]);
       setOllamaConnectionStatus('disconnected');
       return [];
@@ -254,60 +248,80 @@ export const useLocalTranslator = (config: LocalTranslatorConfig) => {
   };
 
   const startTranslation = useCallback(async () => {
+    setConnectionState(ConnectionState.CONNECTING);
     setError(null);
-    setStatusMessage('Starting translation session...');
-
-    await refreshModels();
-
-    // Check connection
-    try {
-       const controller = new AbortController();
-       const id = setTimeout(() => controller.abort(), 2000);
-       const check = await fetch(`${config.ollamaUrl}/api/tags`, { signal: controller.signal });
-       clearTimeout(id);
-       if (!check.ok) throw new Error();
-    } catch (e) {
-       setError(`Cannot reach Ollama at ${config.ollamaUrl}. Make sure it is running with OLLAMA_ORIGINS="*"`);
-       setConnectionState(ConnectionState.ERROR);
-       return;
-    }
-
-    if (!transcriberRef.current) {
-        setStatusMessage('Loading AI model...');
-        await initModel();
-    } else {
-        setStatusMessage('Ready to capture audio...');
-        setConnectionState(ConnectionState.CONNECTED);
-    }
+    setStatusMessage('Please select the tab to translate...');
+    
+    // We need to store the stream locally first to handle cleanup in case of later errors
+    // and to ensure we request media IMMEDIATELY to satisfy browser user gesture requirements.
+    let stream: MediaStream | null = null;
 
     try {
+      // 1. Get Media Stream FIRST
       if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
-        throw new Error("Browser does not support getDisplayMedia");
+        throw new Error("Browser does not support screen sharing.");
       }
 
-      const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: true,
-        audio: {
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false
+      try {
+        stream = await navigator.mediaDevices.getDisplayMedia({
+          video: true,
+          audio: {
+              echoCancellation: false,
+              noiseSuppression: false,
+              autoGainControl: false,
+              sampleRate: 44100
+          }
+        });
+      } catch (mediaErr: any) {
+        if (mediaErr.name === 'NotAllowedError' || mediaErr.message.includes('Permission denied')) {
+            throw new Error("Screen sharing cancelled by user.");
         }
-      });
+        throw mediaErr;
+      }
 
-      if (!stream || stream.getAudioTracks().length === 0) {
-          setStatusMessage('Audio capture cancelled or no audio track found');
-          setConnectionState(ConnectionState.DISCONNECTED);
-          return;
+      // 2. Validate Audio
+      if (stream.getAudioTracks().length === 0) {
+          stream.getTracks().forEach(track => track.stop());
+          throw new Error("No audio found! You MUST check 'Also share tab audio' in the Chrome dialog.");
       }
       
+      // Stop video tracks to save resources
       stream.getVideoTracks().forEach(track => track.stop());
-
+      
+      // Update state now that we have a valid stream
       setSourceStream(stream);
 
+      // 3. Connect to Backend Services
+      setStatusMessage('Connecting to Ollama...');
+
+      // Check Ollama connection explicitly
+      try {
+         const controller = new AbortController();
+         const id = setTimeout(() => controller.abort(), 2000);
+         const check = await fetch(`${config.ollamaUrl}/api/tags`, { signal: controller.signal });
+         clearTimeout(id);
+         if (!check.ok) throw new Error();
+      } catch (e) {
+         throw new Error(`Cannot reach Ollama at ${config.ollamaUrl}. Ensure it's running with OLLAMA_ORIGINS="*"`);
+      }
+      
+      // Refresh models to be safe
+      await refreshModels();
+
+      // 4. Load Whisper
+      if (!transcriberRef.current) {
+          setStatusMessage('Loading Whisper AI model... (First run takes time)');
+          await initModel();
+      }
+
+      setStatusMessage('Processing audio...');
+
+      // 5. Setup Audio Processing
       const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
       const ctx = new AudioContextClass({ sampleRate: 44100 });
       inputContextRef.current = ctx;
 
+      // Resume context if suspended (common in Chrome)
       if (ctx.state === 'suspended') {
         await ctx.resume();
       }
@@ -341,15 +355,24 @@ export const useLocalTranslator = (config: LocalTranslatorConfig) => {
 
       (processor as any)._interval = interval;
 
+      // 6. Success
+      setConnectionState(ConnectionState.CONNECTED);
+
     } catch (err: any) {
       console.error(err);
+      
+      // Clean up the stream if we created one but failed later
+      if (stream) {
+          stream.getTracks().forEach(t => t.stop());
+      }
+      setSourceStream(null);
+      
       const errorMessage = err.message || 'Failed to start translation session';
       setError(errorMessage);
-      setStatusMessage(errorMessage);
+      setStatusMessage('');
       setConnectionState(ConnectionState.ERROR);
-      cleanup();
     }
-  }, [cleanup, config]);
+  }, [cleanup, config, refreshModels]);
 
   const stopTranslation = useCallback(() => {
     if (processorRef.current && (processorRef.current as any)._interval) {
