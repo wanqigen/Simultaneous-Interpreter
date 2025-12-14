@@ -1,30 +1,15 @@
 import React, { useState, useEffect } from 'react';
-import { Mic, Square, AlertCircle, Radio, Server, Cpu, Settings, RefreshCw, ChevronDown, Wifi, WifiOff, ChevronUp, Check, AlertTriangle } from 'lucide-react';
+import { Mic, Square, AlertCircle, Radio, Server, Settings, Activity, Wifi, WifiOff, MessageSquare } from 'lucide-react';
 import { useLocalTranslator } from './hooks/useGeminiTranslator';
 import { ConnectionState } from './types';
 import Visualizer from './components/Visualizer';
 
 const App: React.FC = () => {
-  const [ollamaUrl, setOllamaUrl] = useState('http://localhost:11434');
-  const [modelName, setModelName] = useState('llama3');
-  const [lastRefreshTime, setLastRefreshTime] = useState<Date | null>(null);
-  const [prevSelectedModel, setPrevSelectedModel] = useState<string>('llama3');
-  const [showDropdown, setShowDropdown] = useState<boolean>(false);
-
-  // Close dropdown when clicking outside
-  useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      const dropdown = document.querySelector('.model-dropdown-container');
-      if (dropdown && !dropdown.contains(event.target as Node)) {
-        setShowDropdown(false);
-      }
-    };
-
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => {
-      document.removeEventListener('mousedown', handleClickOutside);
-    };
-  }, []);
+  // Updated default URL per user request
+  const [serverUrl, setServerUrl] = useState('http://127.0.0.1:60808/chat');
+  // Use English instruction for the SpeechT5 model
+  const [instruction, setInstruction] = useState('You are a translator. Translate the following English speech into Chinese speech directly. Do not answer, just translate.');
+  const [lastCheckTime, setLastCheckTime] = useState<Date | null>(null);
 
   const {
     connectionState,
@@ -33,47 +18,17 @@ const App: React.FC = () => {
     startTranslation,
     stopTranslation,
     sourceStream,
-    availableModels,
-    setAvailableModels,
-    refreshModels,
-    isRefreshingModels,
-    ollamaConnectionStatus,
-    downloadProgress
-  } = useLocalTranslator({ ollamaUrl, modelName });
+    serverStatus,
+    checkConnection
+  } = useLocalTranslator({ serverUrl, instruction });
 
   const isConnected = connectionState === ConnectionState.CONNECTED;
   const isConnecting = connectionState === ConnectionState.CONNECTING;
 
-  // Auto-refresh models on mount
+  // Check connection on mount and url change
   useEffect(() => {
-    refreshModels().then(() => setLastRefreshTime(new Date()));
-  }, [refreshModels]);
-
-  // Auto-refresh models when Ollama URL changes
-  useEffect(() => {
-    refreshModels().then(() => setLastRefreshTime(new Date()));
-  }, [ollamaUrl, refreshModels]);
-
-  // Sync modelName with availableModels
-  useEffect(() => {
-    if (availableModels.length > 0) {
-      if (!availableModels.includes(modelName)) {
-        if (availableModels.includes(prevSelectedModel)) {
-          setModelName(prevSelectedModel);
-        } else {
-          setModelName(availableModels[0]);
-        }
-      }
-    } else if (availableModels.length === 0) {
-      setModelName('llama3');
-    }
-  }, [availableModels, modelName, prevSelectedModel]);
-
-  const handleModelSelect = (model: string) => {
-    setModelName(model);
-    setPrevSelectedModel(model);
-    setShowDropdown(false);
-  };
+    checkConnection().then(() => setLastCheckTime(new Date()));
+  }, [checkConnection]);
 
   return (
     <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-4">
@@ -84,10 +39,10 @@ const App: React.FC = () => {
         <div className="bg-slate-900 p-6 border-b border-slate-800">
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center space-x-2">
-              <div className="bg-purple-600 p-2 rounded-lg">
-                <Cpu className="w-5 h-5 text-white" />
+              <div className="bg-blue-600 p-2 rounded-lg">
+                <Activity className="w-5 h-5 text-white" />
               </div>
-              <h1 className="text-xl font-bold text-white">Local Interpreter</h1>
+              <h1 className="text-xl font-bold text-white">Mini-Omni Interpreter</h1>
             </div>
             <div className={`flex items-center space-x-2 px-3 py-1 rounded-full text-xs font-medium ${
               isConnected ? 'bg-green-500/10 text-green-400' : 'bg-slate-800 text-slate-400'
@@ -97,7 +52,7 @@ const App: React.FC = () => {
             </div>
           </div>
           <p className="text-slate-400 text-sm">
-            Chrome Tab Audio &rarr; Local Whisper &rarr; Ollama &rarr; TTS
+            Real-time Speech-to-Speech Translation via Mini-Omni
           </p>
         </div>
 
@@ -105,20 +60,20 @@ const App: React.FC = () => {
         <div className="p-6 space-y-6">
             
           {/* Config Section */}
-          <div className="space-y-3 bg-slate-800/50 p-4 rounded-xl border border-slate-800">
+          <div className="space-y-4 bg-slate-800/50 p-4 rounded-xl border border-slate-800">
              <div className="flex items-center gap-2 text-sm font-medium text-slate-300 mb-2">
-                <Settings className="w-4 h-4" /> Local Configuration
+                <Settings className="w-4 h-4" /> Server Configuration
              </div>
 
              <div className="flex items-center justify-between mb-2 p-2 bg-slate-800/30 rounded-lg">
                 <div className="flex items-center gap-2">
-                  <span className="text-xs text-slate-500">Ollama Status:</span>
-                  {ollamaConnectionStatus === 'connected' ? (
+                  <span className="text-xs text-slate-500">API Status:</span>
+                  {serverStatus === 'connected' ? (
                     <>
                       <Wifi className="w-3 h-3 text-green-400" />
                       <span className="text-green-400 text-xs">Connected</span>
                     </>
-                  ) : ollamaConnectionStatus === 'disconnected' ? (
+                  ) : serverStatus === 'disconnected' ? (
                     <>
                       <WifiOff className="w-3 h-3 text-red-400" />
                       <span className="text-red-400 text-xs">Disconnected</span>
@@ -132,127 +87,44 @@ const App: React.FC = () => {
                 </div>
                 <button
                   onClick={() => {
-                    refreshModels();
-                    setLastRefreshTime(new Date());
+                    checkConnection();
+                    setLastCheckTime(new Date());
                   }}
                   className="text-xs bg-slate-700 hover:bg-slate-600 text-slate-300 px-2 py-1 rounded transition-colors"
-                  title="Test Connection"
                 >
-                  Test Connection
+                  Test
                 </button>
              </div>
              
              <div>
-                <label className="text-xs text-slate-500 mb-1 block">Ollama URL</label>
+                <label className="text-xs text-slate-500 mb-1 block">API Endpoint</label>
                 <div className="flex items-center bg-slate-900 rounded-lg px-3 border border-slate-700">
                     <Server className="w-4 h-4 text-slate-500 mr-2" />
                     <input 
                         type="text" 
-                        value={ollamaUrl}
-                        onChange={(e) => setOllamaUrl(e.target.value)}
-                        onBlur={() => refreshModels()}
+                        value={serverUrl}
+                        onChange={(e) => setServerUrl(e.target.value)}
+                        onBlur={() => checkConnection()}
                         className="bg-transparent border-none text-slate-200 text-sm py-2 w-full focus:outline-none"
-                        placeholder="http://localhost:11434"
+                        placeholder="http://127.0.0.1:60808/chat"
                     />
                 </div>
              </div>
 
              <div>
-                <label className="text-xs text-slate-500 mb-1 flex justify-between">
-                   <span className="flex items-center gap-2">
-                     Model Name
-                     {ollamaConnectionStatus === 'connected' && (
-                       <span className="text-green-400 text-xs" title="Connected to Ollama">
-                         <span className="inline-block w-2 h-2 bg-green-400 rounded-full"></span> Connected
-                       </span>
-                     )}
-                     {ollamaConnectionStatus === 'disconnected' && (
-                       <span className="text-red-400 text-xs" title="Cannot connect to Ollama">
-                         <span className="inline-block w-2 h-2 bg-red-400 rounded-full"></span> Disconnected
-                       </span>
-                     )}
-                     {availableModels.length > 0 && (
-                       <span className={availableModels.includes(modelName) ? "text-green-400 text-xs flex items-center gap-1" : "text-yellow-400 text-xs flex items-center gap-1"}
-                             title={availableModels.includes(modelName) ? "Model is available" : "Model not in available list"}>
-                         {availableModels.includes(modelName) ? <Check className="w-3 h-3" /> : <AlertTriangle className="w-3 h-3" />} {modelName}
-                       </span>
-                     )}
-                     {lastRefreshTime && (
-                       <span className="text-slate-600" title={`Last refreshed: ${lastRefreshTime.toLocaleTimeString()}`}>
-                         (refreshed {lastRefreshTime.toLocaleTimeString()})
-                       </span>
-                     )}
-                   </span>
-                   <button
-                     onClick={() => {
-                       refreshModels();
-                       setLastRefreshTime(new Date());
-                       setShowDropdown(true);
-                     }}
-                     className="text-purple-400 hover:text-purple-300 flex items-center gap-1 transition-all disabled:opacity-50"
-                     title="Refresh Models"
-                     disabled={isRefreshingModels}
-                   >
-                     <RefreshCw className={`w-3 h-3 ${isRefreshingModels || isConnecting ? 'animate-spin' : ''}`} />
-                     {isRefreshingModels ? 'Refreshing...' : 'Refresh'}
-                   </button>
-                </label>
-                <div className="relative model-dropdown-container">
-                  <div className="flex items-center bg-slate-900 rounded-lg px-3 border border-slate-700">
-                    <Cpu className="w-4 h-4 text-slate-500 mr-2" />
-                    <input
-                        type="text"
-                        value={modelName}
-                        onChange={(e) => {
-                          const newModelName = e.target.value;
-                          setModelName(newModelName);
-                          setShowDropdown(true);
-                          if (newModelName && availableModels.includes(newModelName)) {
-                            setPrevSelectedModel(newModelName);
-                          }
-                        }}
-                        onFocus={() => setShowDropdown(true)}
-                        className="bg-transparent border-none text-slate-200 text-sm py-2 w-full focus:outline-none"
-                        placeholder={availableModels.length > 0 ? "Type or select a model..." : "No models available"}
-                        disabled={availableModels.length === 0}
+                <label className="text-xs text-slate-500 mb-1 block">Instruction (TTS Prompt)</label>
+                <div className="flex items-start bg-slate-900 rounded-lg px-3 border border-slate-700">
+                    <MessageSquare className="w-4 h-4 text-slate-500 mr-2 mt-2.5" />
+                    <textarea 
+                        value={instruction}
+                        onChange={(e) => setInstruction(e.target.value)}
+                        className="bg-transparent border-none text-slate-200 text-sm py-2 w-full focus:outline-none resize-none h-24"
+                        placeholder="Enter English instruction (e.g. Translate to Chinese)"
                     />
-                    <button
-                      onClick={() => setShowDropdown(!showDropdown)}
-                      className="text-slate-500 hover:text-slate-400 p-1"
-                      title={showDropdown ? "Hide dropdown" : "Show dropdown"}
-                    >
-                      {showDropdown ? (
-                        <ChevronUp className="w-4 h-4" />
-                      ) : (
-                        <ChevronDown className="w-4 h-4" />
-                      )}
-                    </button>
-                  </div>
-
-                  {/* Custom Dropdown */}
-                  {showDropdown && availableModels.length > 0 && (
-                    <div className="absolute z-20 mt-1 w-full bg-slate-800 border border-slate-700 rounded-lg shadow-lg max-h-60 overflow-y-auto">
-                      {availableModels.map((model) => (
-                        <div
-                          key={model}
-                          className={`px-3 py-2 text-sm cursor-pointer hover:bg-slate-700 ${
-                            model === modelName ? 'bg-slate-700 text-purple-400' : 'text-slate-300'
-                          }`}
-                          onClick={() => handleModelSelect(model)}
-                          title={model}
-                        >
-                          {model}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  {availableModels.length === 0 && (
-                    <div className="absolute right-3 top-1/2 transform -translate-y-1/2 text-xs text-slate-500">
-                      No models found
-                    </div>
-                  )}
                 </div>
+                <p className="text-[10px] text-slate-500 mt-1">
+                   Note: Please use English for the TTS instruction prompt.
+                </p>
              </div>
           </div>
 
@@ -260,41 +132,20 @@ const App: React.FC = () => {
           <div className="space-y-2">
              <div className="flex items-center justify-between text-sm">
                 <span className="text-slate-400 flex items-center gap-2">
-                    <Radio className="w-4 h-4" /> Input Audio
+                    <Radio className="w-4 h-4" /> Input Audio (24kHz)
                 </span>
              </div>
              <Visualizer 
                 stream={sourceStream} 
                 isActive={isConnected} 
-                color="#a855f7" // Purple
+                color="#3b82f6" // Blue
              />
           </div>
 
           {/* Messages */}
           {statusMessage && (
-            <div className="space-y-2">
-              <div className="text-xs text-center text-blue-400 animate-pulse">
-                  {statusMessage}
-              </div>
-
-              {/* Download Progress Bar */}
-              {isConnecting && downloadProgress > 0 && downloadProgress < 100 && (
-                <div className="bg-slate-800 rounded-lg p-3">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-xs text-slate-400">Downloading Model</span>
-                    <span className="text-xs text-slate-300 font-medium">{downloadProgress}%</span>
-                  </div>
-                  <div className="w-full bg-slate-700 rounded-full h-2 overflow-hidden">
-                    <div
-                      className="bg-gradient-to-r from-purple-500 to-purple-400 h-full rounded-full transition-all duration-300 ease-out"
-                      style={{ width: `${downloadProgress}%` }}
-                    />
-                  </div>
-                  <div className="text-xs text-slate-500 mt-1 text-center">
-                    First-time download only (~40MB)
-                  </div>
-                </div>
-              )}
+            <div className="text-xs text-center text-blue-400 animate-pulse">
+                {statusMessage}
             </div>
           )}
 
@@ -304,35 +155,18 @@ const App: React.FC = () => {
                  <AlertCircle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
                  <div className="text-sm text-red-200">{error}</div>
               </div>
-              {error.includes("OLLAMA_ORIGINS") && (
-                  <div className="text-xs text-slate-400 bg-slate-900/50 p-2 rounded select-all font-mono">
-                      export OLLAMA_ORIGINS="*" &amp;&amp; ollama serve
-                  </div>
-              )}
             </div>
           )}
-
-          {/* Ollama Help */}
-          <div className="text-xs text-slate-600 bg-slate-900/50 p-3 rounded-lg">
-            <div className="font-medium text-slate-300 mb-1">Troubleshooting Ollama Connection:</div>
-            <ul className="space-y-1 list-disc list-inside">
-              <li>Make sure Ollama is running: <code className="bg-slate-800 px-1 rounded">ollama serve</code></li>
-              <li>Check Ollama is listening on port 11434 (default)</li>
-              <li>Set environment variable: <code className="bg-slate-800 px-1 rounded">export OLLAMA_ORIGINS="*"</code></li>
-              <li>Try accessing <code className="bg-slate-800 px-1 rounded">{ollamaUrl}/api/tags</code> in browser</li>
-              <li>Firewall may be blocking the connection</li>
-            </ul>
-          </div>
 
           {/* Controls */}
           <div className="pt-2">
             {!isConnected && !isConnecting ? (
               <button
                 onClick={startTranslation}
-                className="w-full group relative flex items-center justify-center gap-3 bg-purple-600 hover:bg-purple-500 text-white font-semibold py-4 px-6 rounded-xl transition-all shadow-lg shadow-purple-900/20"
+                className="w-full group relative flex items-center justify-center gap-3 bg-blue-600 hover:bg-blue-500 text-white font-semibold py-4 px-6 rounded-xl transition-all shadow-lg shadow-blue-900/20"
               >
                 <Mic className="w-5 h-5" />
-                <span>Start Local Session</span>
+                <span>Start Session</span>
               </button>
             ) : (
               <button
@@ -342,7 +176,7 @@ const App: React.FC = () => {
                 {isConnecting ? (
                     <>
                         <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                        <span>Loading Models...</span>
+                        <span>Connecting...</span>
                     </>
                 ) : (
                     <>
@@ -356,7 +190,7 @@ const App: React.FC = () => {
           
           <div className="text-center">
              <p className="text-[10px] text-slate-600">
-                Requires: <code>ollama run {modelName || 'llama3'}</code>
+                Ensure local Mini-Omni server is running on port 60808.
              </p>
           </div>
 

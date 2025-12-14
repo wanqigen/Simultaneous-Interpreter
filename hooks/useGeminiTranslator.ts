@@ -1,22 +1,26 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { ConnectionState } from '../types';
-import { downsampleBuffer, encodeWAV, arrayBufferToBase64, base64ToUint8Array } from '../utils/audio-utils';
+import { downsampleBuffer, encodeWAV, arrayBufferToBase64, convertInt16ToFloat32 } from '../utils/audio-utils';
+import { pipeline, env } from '@xenova/transformers';
 
-interface LocalTranslatorConfig {
-  ollamaUrl: string;
-  modelName: string;
+// Ensure we load models from the CDN/Hugging Face directly
+env.allowLocalModels = false;
+env.useBrowserCache = true;
+
+interface MiniOmniConfig {
+  serverUrl: string;
+  instruction: string;
 }
 
-export const useLocalTranslator = (config: LocalTranslatorConfig) => {
+const TARGET_SAMPLE_RATE = 24000;
+
+export const useLocalTranslator = (config: MiniOmniConfig) => {
   const [connectionState, setConnectionState] = useState<ConnectionState>(ConnectionState.DISCONNECTED);
   const [error, setError] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string>('');
-  const [ollamaConnectionStatus, setOllamaConnectionStatus] = useState<'connected' | 'disconnected' | 'unknown'>('unknown');
-  const [downloadProgress, setDownloadProgress] = useState<number>(100); // No longer needed, set to 100
+  const [serverStatus, setServerStatus] = useState<'connected' | 'disconnected' | 'unknown'>('unknown');
   
   const [sourceStream, setSourceStream] = useState<MediaStream | null>(null);
-  const [availableModels, setAvailableModels] = useState<string[]>([]);
-  const [isRefreshingModels, setIsRefreshingModels] = useState<boolean>(false);
 
   // Audio Processing
   const inputContextRef = useRef<AudioContext | null>(null);
@@ -28,9 +32,8 @@ export const useLocalTranslator = (config: LocalTranslatorConfig) => {
   // Processing State
   const isProcessingRef = useRef<boolean>(false);
   
-  // Audio Playback Queue
-  const audioQueueRef = useRef<ArrayBuffer[]>([]);
-  const isPlayingRef = useRef<boolean>(false);
+  // Audio Playback
+  const nextStartTimeRef = useRef<number>(0);
 
   const cleanup = useCallback(() => {
     if (sourceStream) {
@@ -59,101 +62,128 @@ export const useLocalTranslator = (config: LocalTranslatorConfig) => {
     setStatusMessage('');
   }, [sourceStream]);
 
-  // Fetch Models from Ollama
-  const refreshModels = useCallback(async () => {
+  const checkConnection = useCallback(async () => {
     try {
-      setIsRefreshingModels(true);
-      setError(null);
-
+      setServerStatus('unknown');
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 5000);
-
-      const response = await fetch(`${config.ollamaUrl}/api/tags`, {
-        method: 'GET',
-        headers: { 'Accept': 'application/json' },
-        signal: controller.signal
+      
+      await fetch(config.serverUrl, { 
+          method: 'GET',
+          mode: 'no-cors',
+          signal: controller.signal 
       });
+      
       clearTimeout(timeoutId);
-
-      if (!response.ok) {
-        throw new Error(`Ollama ${response.status}`);
-      }
-
-      const data = await response.json();
-      let models: any[] = [];
-
-      if (data.models && Array.isArray(data.models)) models = data.models;
-      else if (data.Model && Array.isArray(data.Model)) models = data.Model;
-      else if (Array.isArray(data)) models = data;
-
-      const names = models
-        .map((m: any) => m.name || m.id || m.model || m.tag || '')
-        .filter((name: string) => name && typeof name === 'string' && name.length > 0);
-
-      const uniqueNames = [...new Set(names)];
-      setAvailableModels(uniqueNames);
-      setOllamaConnectionStatus('connected');
-      return uniqueNames;
-    } catch (err: any) {
-      console.error("Failed to fetch models", err);
-      setAvailableModels([]);
-      setOllamaConnectionStatus('disconnected');
-      return [];
-    } finally {
-      setIsRefreshingModels(false);
+      setServerStatus('connected');
+      return true;
+    } catch (err) {
+      setServerStatus('disconnected');
+      return false;
     }
-  }, [config.ollamaUrl]);
+  }, [config.serverUrl]);
 
-  // Queue and Play Audio Response
-  const queueAudioResponse = async (base64Audio: string) => {
+  const scheduleAudioChunk = async (chunk: Uint8Array) => {
     try {
-      // Decode Base64 to ArrayBuffer
-      const uint8Array = base64ToUint8Array(base64Audio);
-      audioQueueRef.current.push(uint8Array.buffer);
-      playNextInQueue();
+        if (!outputContextRef.current) {
+            const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+            outputContextRef.current = new AudioContextClass();
+        }
+        const ctx = outputContextRef.current;
+        if (ctx.state === 'suspended') await ctx.resume();
+
+        const float32Data = convertInt16ToFloat32(chunk);
+        
+        const buffer = ctx.createBuffer(1, float32Data.length, TARGET_SAMPLE_RATE);
+        buffer.copyToChannel(float32Data, 0);
+
+        const source = ctx.createBufferSource();
+        source.buffer = buffer;
+        source.connect(ctx.destination);
+
+        if (nextStartTimeRef.current < ctx.currentTime) {
+            nextStartTimeRef.current = ctx.currentTime;
+        }
+
+        source.start(nextStartTimeRef.current);
+        nextStartTimeRef.current += buffer.duration;
+
     } catch (e) {
-      console.error("Error decoding audio response:", e);
+        console.error("Error scheduling audio chunk:", e);
     }
   };
 
-  const playNextInQueue = async () => {
-    if (isPlayingRef.current || audioQueueRef.current.length === 0) return;
+  const sendAudioPayload = async (audioData: Float32Array, sampleRate: number) => {
+      try {
+        const wavBuffer = encodeWAV(audioData, sampleRate);
+        const base64Audio = arrayBufferToBase64(wavBuffer);
+        
+        const response = await fetch(config.serverUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                audio: base64Audio,
+                stream_stride: 4,
+                max_tokens: 2048,
+                // We optionally send prompt, but this method relies on the audio itself being the prompt
+                prompt: config.instruction 
+            })
+        });
 
-    if (!outputContextRef.current) {
-        const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-        outputContextRef.current = new AudioContextClass();
-    }
-    
-    // Ensure context is running
-    if (outputContextRef.current.state === 'suspended') {
-        await outputContextRef.current.resume();
-    }
+        if (!response.ok) {
+            throw new Error(`Server Error: ${response.status}`);
+        }
+        
+        if (!response.body) throw new Error("No response body");
 
-    isPlayingRef.current = true;
-    const audioData = audioQueueRef.current.shift();
+        const reader = response.body.getReader();
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (value) {
+                await scheduleAudioChunk(value);
+            }
+        }
+      } catch (err: any) {
+        console.error("Send payload failed:", err);
+        throw err;
+      }
+  };
 
-    if (!audioData) {
-        isPlayingRef.current = false;
-        return;
-    }
-
+  const generateAndSendInstruction = async () => {
     try {
-        // Decode the MP3/WAV/etc returned by model
-        const audioBuffer = await outputContextRef.current.decodeAudioData(audioData);
-        const source = outputContextRef.current.createBufferSource();
-        source.buffer = audioBuffer;
-        source.connect(outputContextRef.current.destination);
-        
-        source.onended = () => {
-            isPlayingRef.current = false;
-            playNextInQueue();
-        };
-        
-        source.start();
-    } catch (err) {
-        console.error("Error playing audio buffer", err);
-        isPlayingRef.current = false;
-        playNextInQueue();
+      setStatusMessage('Initializing TTS Model...');
+      console.log("Loading TTS pipeline...");
+      
+      // Using SpeechT5 (English) as it is robust and public. 
+      // Ensure your instruction text is in English.
+      const synthesizer = await pipeline('text-to-speech', 'Xenova/speecht5_tts', {
+        progress_callback: (data: any) => {
+            if (data.status === 'progress') {
+                setStatusMessage(`Loading TTS: ${Math.round(data.progress)}%`);
+            }
+        }
+      });
+
+      setStatusMessage('Generating Instruction Audio...');
+      console.log("Synthesizing instruction:", config.instruction);
+      
+      // SpeechT5 requires speaker embeddings
+      const speaker_embeddings = 'https://huggingface.co/datasets/Xenova/transformers.js-docs/resolve/main/speaker_embeddings.bin';
+      
+      const out = await synthesizer(config.instruction, { speaker_embeddings });
+      
+      setStatusMessage('Sending Instruction...');
+      
+      await sendAudioPayload(out.audio, out.sampling_rate);
+      
+      console.log("Instruction sent successfully.");
+      
+    } catch (e: any) {
+      console.error("TTS generation failed:", e);
+      setStatusMessage('TTS Failed, skipping instruction...');
+      // Allow user to see the error briefly
+      await new Promise(r => setTimeout(r, 2000));
     }
   };
 
@@ -162,59 +192,30 @@ export const useLocalTranslator = (config: LocalTranslatorConfig) => {
       return;
     }
 
-    // Process every 3 seconds of audio roughly (3 * 16000 samples)
-    // Adjust this threshold based on model latency preference
-    if (audioBufferRef.current.length < 16000 * 2.5) {
+    if (audioBufferRef.current.length < TARGET_SAMPLE_RATE * 2) {
       return;
     }
 
     isProcessingRef.current = true;
-    const inputData = audioBufferRef.current; // Copy ref
-    audioBufferRef.current = new Float32Array(0); // Reset buffer
+    const inputData = audioBufferRef.current; 
+    audioBufferRef.current = new Float32Array(0); 
+
+    let sum = 0;
+    for (let i = 0; i < inputData.length; i += 100) {
+        sum += Math.abs(inputData[i]);
+    }
+    const avg = sum / (inputData.length / 100);
+    if (avg < 0.01) {
+        isProcessingRef.current = false;
+        return;
+    }
 
     try {
-      console.log("Encoding audio...");
-      // 1. Encode to WAV
-      const wavBuffer = encodeWAV(inputData, 16000);
-      const base64Audio = arrayBufferToBase64(wavBuffer);
-      
-      console.log("Sending audio to Ollama...");
-      
-      // 2. Send to Ollama
-      // Schema assumes standard Ollama "generate" with binary in 'images' 
-      // OR a custom field 'audio' if supported by user's specific model.
-      const response = await fetch(`${config.ollamaUrl}/api/generate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: config.modelName,
-          prompt: "Translate the following audio from English to Chinese. Output audio data.",
-          stream: false,
-          // Sending audio in 'images' field as it's the standard binary slot for multimodal in current Ollama versions.
-          // Some custom audio forks use 'audio' field. We send in 'images' primarily.
-          images: [base64Audio] 
-        })
-      });
-
-      if (!response.ok) {
-        throw new Error(`Ollama API Error: ${response.statusText}`);
-      }
-      
-      const data = await response.json();
-      
-      // 3. Handle Response
-      // We assume the model returns the base64 audio string directly in 'response'
-      const responseContent = data.response.trim();
-      
-      if (responseContent) {
-        console.log("Received response length:", responseContent.length);
-        await queueAudioResponse(responseContent);
-      } else {
-        console.warn("Received empty response from model");
-      }
-
-    } catch (err) {
-      console.error("Audio processing failed:", err);
+      setStatusMessage('Translating...');
+      await sendAudioPayload(inputData, TARGET_SAMPLE_RATE);
+      setStatusMessage('Listening...');
+    } catch (err: any) {
+      setStatusMessage(`Error: ${err.message || 'Send Failed'}`);
     } finally {
       isProcessingRef.current = false;
     }
@@ -224,7 +225,15 @@ export const useLocalTranslator = (config: LocalTranslatorConfig) => {
     let stream: MediaStream | null = null;
 
     try {
-      // 1. Get Permission First
+      setConnectionState(ConnectionState.CONNECTING);
+      setError(null);
+
+      // 1. Generate and Send TTS Instruction First
+      if (config.instruction && config.instruction.trim().length > 0) {
+          await generateAndSendInstruction();
+      }
+
+      // 2. Start Microphone/Tab Audio
       if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
         throw new Error("Browser does not support screen sharing.");
       }
@@ -246,56 +255,41 @@ export const useLocalTranslator = (config: LocalTranslatorConfig) => {
         throw mediaErr;
       }
 
-      setConnectionState(ConnectionState.CONNECTING);
-      setError(null);
       setSourceStream(stream);
 
-      // 2. Validate Audio
       if (stream.getAudioTracks().length === 0) {
           stream.getTracks().forEach(track => track.stop());
-          throw new Error("No audio found! Check 'Also share tab audio' in Chrome dialog.");
+          throw new Error("No audio found! Check 'Also share tab audio'.");
       }
       
       stream.getVideoTracks().forEach(track => track.stop());
       
-      setStatusMessage('Connecting to Ollama...');
-
-      // 3. Connect to Backend
-      try {
-         const controller = new AbortController();
-         const id = setTimeout(() => controller.abort(), 2000);
-         const check = await fetch(`${config.ollamaUrl}/api/tags`, { signal: controller.signal });
-         clearTimeout(id);
-         if (!check.ok) throw new Error();
-      } catch (e) {
-         throw new Error(`Cannot reach Ollama at ${config.ollamaUrl}`);
+      const connected = await checkConnection();
+      if (!connected) {
+          console.warn(`Connection check to ${config.serverUrl} failed.`);
       }
       
-      setStatusMessage('Streaming Audio to Model...');
+      setStatusMessage('Listening...');
 
-      // 4. Setup Audio Input Processing
       const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
       const ctx = new AudioContextClass({ sampleRate: 44100 });
       inputContextRef.current = ctx;
 
-      if (ctx.state === 'suspended') {
-        await ctx.resume();
-      }
+      if (ctx.state === 'suspended') await ctx.resume();
 
       const source = ctx.createMediaStreamSource(stream);
       const processor = ctx.createScriptProcessor(4096, 1, 1);
 
       processor.onaudioprocess = (e) => {
         const inputData = e.inputBuffer.getChannelData(0);
-        // Downsample to 16k for bandwidth/model compatibility
-        const downsampled = downsampleBuffer(inputData, ctx.sampleRate, 16000);
+        const downsampled = downsampleBuffer(inputData, ctx.sampleRate, TARGET_SAMPLE_RATE);
 
         const newBuffer = new Float32Array(audioBufferRef.current.length + downsampled.length);
         newBuffer.set(audioBufferRef.current);
         newBuffer.set(downsampled, audioBufferRef.current.length);
         audioBufferRef.current = newBuffer;
 
-        if (!isProcessingRef.current && audioBufferRef.current.length > 16000 * 3) {
+        if (!isProcessingRef.current && audioBufferRef.current.length > TARGET_SAMPLE_RATE * 3) {
             processAudioBuffer();
         }
       };
@@ -324,7 +318,7 @@ export const useLocalTranslator = (config: LocalTranslatorConfig) => {
       setStatusMessage('');
       setConnectionState(ConnectionState.ERROR);
     }
-  }, [cleanup, config]);
+  }, [cleanup, config, checkConnection]);
 
   const stopTranslation = useCallback(() => {
     if (processorRef.current && (processorRef.current as any)._interval) {
@@ -346,11 +340,7 @@ export const useLocalTranslator = (config: LocalTranslatorConfig) => {
     startTranslation,
     stopTranslation,
     sourceStream,
-    availableModels,
-    setAvailableModels,
-    refreshModels,
-    isRefreshingModels,
-    ollamaConnectionStatus,
-    downloadProgress
+    serverStatus,
+    checkConnection
   };
 };
