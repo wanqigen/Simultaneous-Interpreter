@@ -1,0 +1,8 @@
+{
+  "name": "Gemini Simultaneous Interpreter",
+  "description": "Real-time English to Chinese simultaneous translation for Chrome Tabs using Gemini Live API.",
+  "requestFramePermissions": [
+    "microphone",
+    "display-capture"
+  ]
+}
